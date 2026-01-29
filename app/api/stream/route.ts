@@ -1,4 +1,9 @@
-import { getAllBots, getAllBotStates } from '@/lib/db';
+import {
+  getAllBots,
+  getAllBotStates,
+  getProfitHistory,
+  getTotalProfitHistory,
+} from '@/lib/db';
 
 export const runtime = 'nodejs';
 
@@ -10,6 +15,7 @@ export async function GET() {
       let isClosed = false;
       let lastConfigHash = '';
       let lastStateHash = '';
+      let lastProfitHash = '';
 
       const sendEvent = (event: string, data: any) => {
         if (isClosed) return;
@@ -40,6 +46,37 @@ export async function GET() {
           sendEvent('state', state);
         } catch (e) {
           sendEvent('state', { states: [] });
+        }
+      };
+
+      const sendProfitHistory = () => {
+        try {
+          const bots = getAllBots();
+          const profitData: any = {};
+
+          // Get history for each bot
+          bots.forEach((bot) => {
+            try {
+              profitData[bot.id] = getProfitHistory(bot.id, 20);
+            } catch (e) {
+              profitData[bot.id] = [];
+            }
+          });
+
+          // Get total profit history
+          try {
+            profitData.total = getTotalProfitHistory(50);
+          } catch (e) {
+            profitData.total = [];
+          }
+
+          const profitHash = JSON.stringify(profitData);
+          if (profitHash !== lastProfitHash) {
+            lastProfitHash = profitHash;
+            sendEvent('profit', profitData);
+          }
+        } catch (e) {
+          sendEvent('profit', {});
         }
       };
 
@@ -91,6 +128,7 @@ export async function GET() {
       // 초기 데이터 전송
       sendConfig();
       sendState();
+      sendProfitHistory();
       await sendPm2Status();
 
       // 1초마다 변경 체크
@@ -98,10 +136,22 @@ export async function GET() {
         if (isClosed) {
           clearInterval(checkInterval);
           clearInterval(pm2Interval);
+          clearInterval(profitInterval);
           return;
         }
         checkChanges();
       }, 1000);
+
+      // 10초마다 수익 히스토리 체크
+      const profitInterval = setInterval(() => {
+        if (isClosed) {
+          clearInterval(checkInterval);
+          clearInterval(pm2Interval);
+          clearInterval(profitInterval);
+          return;
+        }
+        sendProfitHistory();
+      }, 10000);
 
       // 5초마다 PM2 상태 체크
       const pm2Interval = setInterval(async () => {
@@ -118,6 +168,7 @@ export async function GET() {
         isClosed = true;
         clearInterval(checkInterval);
         clearInterval(pm2Interval);
+        clearInterval(profitInterval);
       };
     },
   });

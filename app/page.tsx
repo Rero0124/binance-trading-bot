@@ -1,6 +1,15 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import {
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+} from 'recharts';
 
 type BotConfig = {
   id: string;
@@ -54,6 +63,12 @@ type BotState = {
     slow?: number | null;
     signal?: string;
   };
+  account?: {
+    virtual?: boolean;
+    totalValue?: number;
+    profitLoss?: number;
+    profitLossPercent?: number;
+  };
   position?: Record<string, unknown>;
   lastDecision?: Record<string, unknown>;
 };
@@ -72,6 +87,9 @@ type WalletBalance = {
 export default function Home() {
   const [botsConfig, setBotsConfig] = useState<BotsConfig | null>(null);
   const [botsState, setBotsState] = useState<BotsState | null>(null);
+  const [profitHistory, setProfitHistory] = useState<
+    Record<string, Array<{ timestamp: string; profit: number }>>
+  >({});
   const [selectedBotId, setSelectedBotId] = useState<string | null>(null);
   const [editingBot, setEditingBot] = useState<BotConfig | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -84,6 +102,7 @@ export default function Home() {
     useState<BotConfig | null>(null);
   const [walletBalances, setWalletBalances] = useState<WalletBalance[]>([]);
   const [walletLoading, setWalletLoading] = useState(false);
+  const [showWallet, setShowWallet] = useState(false);
 
   const selectedBot = botsConfig?.bots.find((b) => b.id === selectedBotId);
   const selectedState = botsState?.states.find(
@@ -96,14 +115,30 @@ export default function Home() {
     eventSource.addEventListener('config', (e) => {
       const data = JSON.parse(e.data);
       setBotsConfig(data);
-      if (!selectedBotId && data.bots?.length > 0) {
-        setSelectedBotId(data.bots[0].id);
-      }
+
+      setSelectedBotId((currentSelectedId) => {
+        if (!currentSelectedId && data.bots?.length > 0) {
+          return data.bots[0].id;
+        } else if (currentSelectedId && data.bots?.length > 0) {
+          const stillExists = data.bots.some(
+            (bot: any) => bot.id === currentSelectedId,
+          );
+          if (!stillExists) {
+            return data.bots[0].id;
+          }
+        }
+        return currentSelectedId;
+      });
     });
 
     eventSource.addEventListener('state', (e) => {
       const data = JSON.parse(e.data);
       setBotsState(data);
+    });
+
+    eventSource.addEventListener('profit', (e) => {
+      const data = JSON.parse(e.data);
+      setProfitHistory(data);
     });
 
     eventSource.addEventListener('pm2', (e) => {
@@ -379,45 +414,75 @@ export default function Home() {
               >
                 재시작
               </button>
+              <button
+                onClick={() => {
+                  setShowWallet(!showWallet);
+                  if (!showWallet && walletBalances.length === 0) {
+                    loadWallet();
+                  }
+                }}
+                className={`rounded-lg px-4 py-2 text-sm font-medium text-white ${
+                  showWallet
+                    ? 'bg-purple-600 hover:bg-purple-700'
+                    : 'bg-gray-600 hover:bg-gray-700'
+                }`}
+              >
+                💰 지갑 {showWallet ? '닫기' : '열기'}
+              </button>
             </div>
           </div>
 
-          <div className="border-t border-gray-200 pt-4">
-            <div className="mb-2 flex items-center justify-between">
-              <h2 className="text-lg font-semibold text-gray-900">내 지갑</h2>
-              <button
-                onClick={loadWallet}
-                disabled={walletLoading}
-                className="text-sm text-blue-600 hover:text-blue-700 disabled:opacity-50"
-              >
-                {walletLoading ? '로딩 중...' : '새로고침'}
-              </button>
+          {showWallet && (
+            <div className="mb-4 rounded-lg border border-purple-200 bg-purple-50 p-4">
+              <div className="mb-3 flex items-center justify-between">
+                <h3 className="text-lg font-semibold text-gray-900">
+                  💰 지갑 잔액
+                </h3>
+                <button
+                  onClick={loadWallet}
+                  disabled={walletLoading}
+                  className="rounded-lg bg-purple-600 px-3 py-1 text-xs font-medium text-white hover:bg-purple-700 disabled:opacity-50"
+                >
+                  {walletLoading ? '로딩 중...' : '새로고침'}
+                </button>
+              </div>
+              {walletLoading ? (
+                <div className="text-center text-sm text-gray-500">
+                  로딩 중...
+                </div>
+              ) : walletBalances.length === 0 ? (
+                <div className="text-center text-sm text-gray-500">
+                  지갑 정보를 불러올 수 없습니다
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                  {walletBalances
+                    .filter((b) => b.total > 0)
+                    .map((balance) => (
+                      <div
+                        key={balance.asset}
+                        className="rounded-lg bg-white p-3 shadow-sm"
+                      >
+                        <div className="text-xs font-medium text-gray-500">
+                          {balance.asset}
+                        </div>
+                        <div className="mt-1 text-lg font-bold text-gray-900">
+                          {balance.total.toFixed(
+                            balance.asset === 'USDT' ? 2 : 6,
+                          )}
+                        </div>
+                        <div className="mt-1 text-xs text-gray-500">
+                          사용 가능:{' '}
+                          {balance.free.toFixed(
+                            balance.asset === 'USDT' ? 2 : 6,
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              )}
             </div>
-            {walletBalances.length === 0 ? (
-              <div className="rounded-lg bg-gray-50 p-4 text-center text-sm text-gray-500">
-                지갑 정보를 불러오는 중...
-              </div>
-            ) : (
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
-                {walletBalances.map((balance) => (
-                  <div
-                    key={balance.asset}
-                    className="rounded-lg border border-gray-200 bg-gray-50 p-3"
-                  >
-                    <div className="text-xs font-medium text-gray-500">
-                      {balance.asset}
-                    </div>
-                    <div className="text-2xl font-bold text-gray-900">
-                      {balance.total.toFixed(5)}
-                    </div>
-                    <div className="mt-1 text-sm text-gray-600">
-                      사용 가능: {balance.free.toFixed(5)}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
+          )}
         </div>
 
         {error && (
@@ -783,6 +848,16 @@ export default function Home() {
                     </div>
                   </div>
                 )}
+
+                <div className="rounded-lg border border-gray-200 p-4">
+                  <div className="mb-3 text-xs font-medium text-gray-500">
+                    📈 수익 추이 (최근 20개)
+                  </div>
+                  <MiniProfitChart
+                    state={selectedState}
+                    profitData={profitHistory[selectedState.botId]}
+                  />
+                </div>
               </div>
             </div>
           )}
@@ -929,6 +1004,7 @@ export default function Home() {
                     }
                   >
                     <option value="1m">1분</option>
+                    <option value="3m">3분</option>
                     <option value="5m">5분</option>
                     <option value="15m">15분</option>
                     <option value="1h">1시간</option>
@@ -1290,7 +1366,170 @@ export default function Home() {
             </div>
           </div>
         )}
+
+        {botsConfig && botsState && (
+          <div className="mt-6 rounded-xl bg-white p-6 shadow-sm">
+            <h2 className="mb-4 text-xl font-bold text-gray-900">
+              📈 전체 수익 그래프 (실거래 봇만)
+            </h2>
+            <TotalProfitChart profitData={profitHistory.total} />
+          </div>
+        )}
       </div>
+    </div>
+  );
+}
+
+function MiniProfitChart({
+  state,
+  profitData,
+}: {
+  state: BotState;
+  profitData?: Array<{ timestamp: string; profit: number }>;
+}) {
+  const [history, setHistory] = useState<
+    Array<{ time: string; value: number }>
+  >([]);
+
+  useEffect(() => {
+    if (profitData && profitData.length > 0) {
+      const formattedHistory = profitData.map((item) => {
+        const timestamp = item.timestamp.replace(' ', 'T');
+        return {
+          time: new Date(timestamp).toLocaleTimeString('ko-KR', {
+            hour: '2-digit',
+            minute: '2-digit',
+          }),
+          value: item.profit,
+        };
+      });
+      setHistory(formattedHistory);
+    }
+  }, [profitData]);
+
+  if (history.length === 0) {
+    return (
+      <div className="flex h-32 items-center justify-center text-gray-500 text-xs">
+        데이터 수집 중...
+      </div>
+    );
+  }
+
+  return (
+    <div className="h-32">
+      <ResponsiveContainer width="100%" height="100%">
+        <LineChart
+          data={history}
+          margin={{ top: 5, right: 5, left: 0, bottom: 5 }}
+        >
+          <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+          <XAxis dataKey="time" tick={{ fontSize: 10 }} stroke="#9ca3af" />
+          <YAxis
+            tick={{ fontSize: 10 }}
+            stroke="#9ca3af"
+            domain={['auto', 'auto']}
+          />
+          <Tooltip
+            contentStyle={{
+              backgroundColor: '#1f2937',
+              border: 'none',
+              borderRadius: '0.5rem',
+              fontSize: '12px',
+            }}
+            labelStyle={{ color: '#fff', fontWeight: 'bold' }}
+            formatter={(value: number | undefined) => [
+              value !== undefined
+                ? `${value >= 0 ? '+' : ''}${value.toFixed(2)} USDT`
+                : 'N/A',
+              '수익',
+            ]}
+          />
+          <Line
+            type="monotone"
+            dataKey="value"
+            stroke="#3b82f6"
+            strokeWidth={2}
+            dot={{ fill: '#3b82f6', r: 3 }}
+            activeDot={{ r: 5 }}
+          />
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+function TotalProfitChart({
+  profitData,
+}: {
+  profitData?: Array<{ timestamp: string; profit: number }>;
+}) {
+  const [history, setHistory] = useState<
+    Array<{ time: string; value: number }>
+  >([]);
+
+  useEffect(() => {
+    if (profitData && profitData.length > 0) {
+      const formattedHistory = profitData.map((item) => {
+        const timestamp = item.timestamp.replace(' ', 'T');
+        return {
+          time: new Date(timestamp).toLocaleTimeString('ko-KR', {
+            hour: '2-digit',
+            minute: '2-digit',
+          }),
+          value: item.profit,
+        };
+      });
+      setHistory(formattedHistory);
+    }
+  }, [profitData]);
+
+  if (history.length === 0) {
+    return (
+      <div className="flex h-64 items-center justify-center text-gray-500">
+        데이터 수집 중...
+      </div>
+    );
+  }
+
+  return (
+    <div className="h-64">
+      <ResponsiveContainer width="100%" height="100%">
+        <LineChart
+          data={history}
+          margin={{ top: 5, right: 20, left: 0, bottom: 5 }}
+        >
+          <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+          <XAxis dataKey="time" tick={{ fontSize: 11 }} stroke="#9ca3af" />
+          <YAxis
+            tick={{ fontSize: 11 }}
+            stroke="#9ca3af"
+            domain={['auto', 'auto']}
+          />
+          <Tooltip
+            contentStyle={{
+              backgroundColor: '#1f2937',
+              border: 'none',
+              borderRadius: '0.5rem',
+              fontSize: '13px',
+            }}
+            labelStyle={{ color: '#fff', fontWeight: 'bold' }}
+            formatter={(value: number | undefined) => [
+              value !== undefined
+                ? `${value >= 0 ? '+' : ''}${value.toFixed(2)} USDT`
+                : 'N/A',
+              '전체 수익',
+            ]}
+          />
+          <Line
+            type="monotone"
+            dataKey="value"
+            stroke="#3b82f6"
+            strokeWidth={2.5}
+            dot={{ fill: '#3b82f6', r: 4 }}
+            activeDot={{ r: 6 }}
+          />
+        </LineChart>
+      </ResponsiveContainer>
     </div>
   );
 }

@@ -1,6 +1,14 @@
 import 'dotenv/config';
 import crypto from 'crypto';
-import { getAllBots, getBotById, updateBot, upsertBotState } from './db.mjs';
+import {
+  getAllBots,
+  getBotById,
+  updateBot,
+  upsertBotState,
+  insertProfitHistory,
+  deleteBotProfitHistory,
+  insertWalletHistory,
+} from './db.mjs';
 
 function nowIso() {
   return new Date().toISOString();
@@ -375,6 +383,7 @@ async function runBot(botConfig, apiKey, apiSecret) {
   const botId = botConfig.id;
   let lastDecision = null;
   const runtime = initBotRuntime(botId);
+  let lastProfitRecordTime = 0;
 
   while (true) {
     const startedAt = Date.now();
@@ -399,6 +408,19 @@ async function runBot(botConfig, apiKey, apiSecret) {
         console.log(
           `[Bot ${botId}] enabled changed: ${oldEnabled} -> ${newEnabled}`,
         );
+
+        // Clear profit history when bot is enabled
+        if (!oldEnabled && newEnabled) {
+          console.log(`[Bot ${botId}] Clearing profit history (bot enabled)`);
+          try {
+            deleteBotProfitHistory(botId);
+          } catch (err) {
+            console.error(
+              `[Bot ${botId}] Failed to clear profit history:`,
+              err,
+            );
+          }
+        }
       }
     } else {
       console.log(`[Bot ${botId}] WARNING: getBotById returned null`);
@@ -487,33 +509,63 @@ async function runBot(botConfig, apiKey, apiSecret) {
           leverage,
         });
 
-        const account = await futuresAccount({ baseUrl, apiKey, apiSecret });
-        const positions = await futuresPositionRisk({
-          baseUrl,
-          apiKey,
-          apiSecret,
-          symbol,
-        });
-        const pos = Array.isArray(positions) ? positions[0] : null;
+        let walletBalance;
+        let positionAmt = 0;
 
-        const positionAmt = pos ? Number(pos.positionAmt) : 0;
-        const entryPrice = pos ? Number(pos.entryPrice) : 0;
-        const markPrice = pos ? Number(pos.markPrice) : null;
-        const unrealizedProfit = pos ? Number(pos.unRealizedProfit) : null;
-        const walletBalance = Number(account.totalWalletBalance);
+        if (config.dryRun) {
+          // Use virtual balance for dry run mode
+          if (!config.virtualBalance) {
+            config.virtualBalance = {
+              initialQuoteBalance: 1000,
+              currentQuoteBalance: 1000,
+              currentBaseBalance: 0,
+            };
+          }
+          walletBalance = config.virtualBalance.initialQuoteBalance;
 
-        state.account = {
-          totalWalletBalance: walletBalance,
-          totalUnrealizedProfit: Number(account.totalUnrealizedProfit),
-        };
+          state.account = {
+            totalWalletBalance: walletBalance,
+            totalUnrealizedProfit: 0,
+            virtual: true,
+          };
 
-        state.position = {
-          symbol,
-          positionAmt,
-          entryPrice,
-          markPrice,
-          unrealizedProfit,
-        };
+          state.position = {
+            symbol,
+            positionAmt: 0,
+            entryPrice: 0,
+            markPrice: null,
+            unrealizedProfit: 0,
+          };
+        } else {
+          // Use real account for live trading
+          const account = await futuresAccount({ baseUrl, apiKey, apiSecret });
+          const positions = await futuresPositionRisk({
+            baseUrl,
+            apiKey,
+            apiSecret,
+            symbol,
+          });
+          const pos = Array.isArray(positions) ? positions[0] : null;
+
+          positionAmt = pos ? Number(pos.positionAmt) : 0;
+          const entryPrice = pos ? Number(pos.entryPrice) : 0;
+          const markPrice = pos ? Number(pos.markPrice) : null;
+          const unrealizedProfit = pos ? Number(pos.unRealizedProfit) : null;
+          walletBalance = Number(account.totalWalletBalance);
+
+          state.account = {
+            totalWalletBalance: walletBalance,
+            totalUnrealizedProfit: Number(account.totalUnrealizedProfit),
+          };
+
+          state.position = {
+            symbol,
+            positionAmt,
+            entryPrice,
+            markPrice,
+            unrealizedProfit,
+          };
+        }
 
         const lossCheck = checkMaxLoss(runtime, config, walletBalance);
         if (!lossCheck.allowed) {
@@ -789,6 +841,38 @@ async function runBot(botConfig, apiKey, apiSecret) {
 
       upsertBotState(state);
 
+      // Record profit history every minute
+      const now = Date.now();
+      if (now - lastProfitRecordTime >= 60000) {
+        lastProfitRecordTime = now;
+
+        let profit = 0;
+        let balance = null;
+        let positionSize = null;
+        let entryPrice = null;
+
+        if (state.account?.virtual) {
+          profit = Number(state.account.profitLoss) || 0;
+          balance = Number(state.account.totalValue) || 0;
+        } else if (state.position?.unrealizedProfit !== undefined) {
+          profit = Number(state.position.unrealizedProfit) || 0;
+          positionSize = Math.abs(Number(state.position.positionAmt) || 0);
+          entryPrice = Number(state.position.entryPrice) || 0;
+        }
+
+        try {
+          insertProfitHistory({
+            botId,
+            profit,
+            balance,
+            positionSize,
+            entryPrice,
+          });
+        } catch (err) {
+          console.error(`[Bot ${botId}] Failed to record profit history:`, err);
+        }
+      }
+
       if (botConfig.dryRun && botConfig.virtualBalance) {
         updateBot(botConfig);
       }
@@ -866,6 +950,61 @@ async function main() {
       console.error('syncBots error:', e);
     }
   }, 10000);
+
+  // Record overall wallet history every minute
+  setInterval(() => {
+    try {
+      const bots = getAllBots();
+      const states = bots
+        .map((bot) => {
+          try {
+            const state = db
+              .prepare('SELECT * FROM bot_states WHERE bot_id = ?')
+              .get(bot.id);
+            if (!state) return null;
+            return {
+              bot,
+              state: {
+                account: state.account ? JSON.parse(state.account) : null,
+                position: state.position ? JSON.parse(state.position) : null,
+              },
+            };
+          } catch (e) {
+            return null;
+          }
+        })
+        .filter(Boolean);
+
+      let totalProfit = 0;
+      let totalBalance = 0;
+      let activeBots = 0;
+
+      states.forEach(({ bot, state }) => {
+        // Only count real trading bots (not dry run, not testnet)
+        if (bot.dryRun || bot.useTestnet) return;
+
+        activeBots++;
+
+        if (state.position?.unrealizedProfit !== undefined) {
+          totalProfit += Number(state.position.unrealizedProfit) || 0;
+        }
+
+        if (state.account?.totalValue !== undefined) {
+          totalBalance += Number(state.account.totalValue) || 0;
+        }
+      });
+
+      if (activeBots > 0) {
+        insertWalletHistory({
+          totalProfit,
+          totalBalance: totalBalance > 0 ? totalBalance : null,
+          activeBots,
+        });
+      }
+    } catch (e) {
+      console.error('Failed to record wallet history:', e);
+    }
+  }, 60000); // Every minute
 }
 
 main().catch((e) => {

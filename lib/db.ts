@@ -61,8 +61,30 @@ db.exec(`
     FOREIGN KEY (bot_id) REFERENCES bots(id) ON DELETE CASCADE
   );
 
+  CREATE TABLE IF NOT EXISTS profit_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bot_id TEXT NOT NULL,
+    timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+    profit REAL NOT NULL,
+    balance REAL,
+    position_size REAL,
+    entry_price REAL,
+    FOREIGN KEY (bot_id) REFERENCES bots(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS wallet_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+    total_profit REAL NOT NULL,
+    total_balance REAL,
+    active_bots INTEGER
+  );
+
   CREATE INDEX IF NOT EXISTS idx_bots_enabled ON bots(enabled);
   CREATE INDEX IF NOT EXISTS idx_bot_states_bot_id ON bot_states(bot_id);
+  CREATE INDEX IF NOT EXISTS idx_profit_history_bot_id ON profit_history(bot_id);
+  CREATE INDEX IF NOT EXISTS idx_profit_history_timestamp ON profit_history(timestamp);
+  CREATE INDEX IF NOT EXISTS idx_wallet_history_timestamp ON wallet_history(timestamp);
 `);
 
 export type BotConfig = {
@@ -163,7 +185,7 @@ export function createBot(bot: BotConfig): void {
     bot.position.cooldownCandles,
     bot.virtualBalance?.initialQuoteBalance || null,
     bot.virtualBalance?.currentQuoteBalance || null,
-    bot.virtualBalance?.currentBaseBalance || null
+    bot.virtualBalance?.currentBaseBalance || null,
   );
 }
 
@@ -207,7 +229,7 @@ export function updateBot(bot: BotConfig): void {
     bot.virtualBalance?.initialQuoteBalance || null,
     bot.virtualBalance?.currentQuoteBalance || null,
     bot.virtualBalance?.currentBaseBalance || null,
-    bot.id
+    bot.id,
   );
 }
 
@@ -222,7 +244,9 @@ export function getAllBotStates(): BotState[] {
 }
 
 export function getBotState(botId: string): BotState | null {
-  const row = db.prepare('SELECT * FROM bot_states WHERE bot_id = ?').get(botId);
+  const row = db
+    .prepare('SELECT * FROM bot_states WHERE bot_id = ?')
+    .get(botId);
   return row ? rowToState(row as any) : null;
 }
 
@@ -254,7 +278,7 @@ export function upsertBotState(state: BotState): void {
     state.marketData ? JSON.stringify(state.marketData) : null,
     state.account ? JSON.stringify(state.account) : null,
     state.position ? JSON.stringify(state.position) : null,
-    state.lastDecision ? JSON.stringify(state.lastDecision) : null
+    state.lastDecision ? JSON.stringify(state.lastDecision) : null,
   );
 }
 
@@ -312,6 +336,98 @@ function rowToState(row: any): BotState {
     position: row.position ? JSON.parse(row.position) : undefined,
     lastDecision: row.last_decision ? JSON.parse(row.last_decision) : undefined,
   };
+}
+
+// Profit History operations
+export function insertProfitHistory(data: {
+  botId: string;
+  profit: number;
+  balance?: number;
+  positionSize?: number;
+  entryPrice?: number;
+}): void {
+  const stmt = db.prepare(`
+    INSERT INTO profit_history (bot_id, profit, balance, position_size, entry_price)
+    VALUES (?, ?, ?, ?, ?)
+  `);
+
+  stmt.run(
+    data.botId,
+    data.profit,
+    data.balance || null,
+    data.positionSize || null,
+    data.entryPrice || null,
+  );
+}
+
+export function getProfitHistory(
+  botId: string,
+  limit: number = 100,
+): Array<{ timestamp: string; profit: number; balance?: number }> {
+  const rows = db
+    .prepare(
+      `SELECT timestamp, profit, balance FROM profit_history 
+       WHERE bot_id = ? 
+       ORDER BY timestamp DESC 
+       LIMIT ?`,
+    )
+    .all(botId, limit) as any[];
+
+  return rows
+    .map((row) => ({
+      timestamp: row.timestamp,
+      profit: row.profit,
+      balance: row.balance,
+    }))
+    .reverse();
+}
+
+export function getTotalProfitHistory(
+  limit: number = 100,
+): Array<{ timestamp: string; profit: number }> {
+  const rows = db
+    .prepare(
+      `SELECT timestamp, total_profit as profit 
+       FROM wallet_history 
+       ORDER BY timestamp DESC 
+       LIMIT ?`,
+    )
+    .all(limit) as any[];
+
+  return rows
+    .map((row) => ({
+      timestamp: row.timestamp,
+      profit: row.profit,
+    }))
+    .reverse();
+}
+
+export function insertWalletHistory(data: {
+  totalProfit: number;
+  totalBalance?: number;
+  activeBots?: number;
+}): void {
+  const stmt = db.prepare(`
+    INSERT INTO wallet_history (total_profit, total_balance, active_bots)
+    VALUES (?, ?, ?)
+  `);
+
+  stmt.run(
+    data.totalProfit,
+    data.totalBalance || null,
+    data.activeBots || null,
+  );
+}
+
+export function cleanOldProfitHistory(daysToKeep: number = 7): void {
+  db.prepare(
+    `DELETE FROM profit_history 
+WHERE timestamp < datetime('now', '-' || ? || ' days')`,
+  ).run(daysToKeep);
+}
+
+export function deleteBotProfitHistory(botId: string): void {
+  db.prepare('DELETE FROM profit_history WHERE bot_id = ?').run(botId);
 }
 
 export function closeDatabase(): void {

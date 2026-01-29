@@ -71,6 +71,97 @@ export function updateBot(bot) {
   );
 }
 
+export function insertProfitHistory(data) {
+  const stmt = db.prepare(`
+    INSERT INTO profit_history (bot_id, profit, balance, position_size, entry_price)
+    VALUES (?, ?, ?, ?, ?)
+  `);
+
+  stmt.run(
+    data.botId,
+    data.profit,
+    data.balance || null,
+    data.positionSize || null,
+    data.entryPrice || null,
+  );
+}
+
+export function getProfitHistory(botId, limit = 100) {
+  const rows = db
+    .prepare(
+      `SELECT timestamp, profit, balance FROM profit_history 
+       WHERE bot_id = ? 
+       ORDER BY timestamp DESC 
+       LIMIT ?`,
+    )
+    .all(botId, limit);
+
+  return rows
+    .map((row) => ({
+      timestamp: row.timestamp,
+      profit: row.profit,
+      balance: row.balance,
+    }))
+    .reverse();
+}
+
+export function getTotalProfitHistory(limit = 100) {
+  const rows = db
+    .prepare(
+      `SELECT timestamp, SUM(profit) as total_profit 
+       FROM profit_history 
+       WHERE bot_id IN (
+         SELECT id FROM bots WHERE dry_run = 0 AND use_testnet = 0
+       )
+       GROUP BY timestamp 
+       ORDER BY timestamp DESC 
+       LIMIT ?`,
+    )
+    .all(limit);
+
+  return rows
+    .map((row) => ({
+      timestamp: row.timestamp,
+      profit: row.total_profit,
+    }))
+    .reverse();
+}
+
+export function getTotalWalletHistory(limit = 100) {
+  const rows = db
+    .prepare(
+      `SELECT timestamp, total_profit as profit 
+       FROM wallet_history 
+       ORDER BY timestamp DESC 
+       LIMIT ?`,
+    )
+    .all(limit);
+
+  return rows
+    .map((row) => ({
+      timestamp: row.timestamp,
+      profit: row.profit,
+    }))
+    .reverse();
+}
+
+export function insertWalletHistory(data) {
+  const stmt = db.prepare(`
+    INSERT INTO wallet_history (total_profit, total_balance, active_bots)
+    VALUES (?, ?, ?)
+  `);
+
+  stmt.run(
+    data.totalProfit,
+    data.totalBalance || null,
+    data.activeBots || null,
+  );
+}
+
+export function deleteBotProfitHistory(botId) {
+  db.prepare('DELETE FROM profit_history WHERE bot_id = ?').run(botId);
+}
+
 export function upsertBotState(state) {
   const stmt = db.prepare(`
     INSERT INTO bot_states (
