@@ -368,15 +368,30 @@ function updateVirtualBalance(config, side, qty, price) {
 
   if (side === 'BUY') {
     const cost = qty * price;
+    // Check if enough USDT balance
+    if (vb.currentQuoteBalance < cost) {
+      console.log(
+        `[Bot ${config.id}] Insufficient USDT balance: ${vb.currentQuoteBalance} < ${cost}`,
+      );
+      return false;
+    }
     vb.currentQuoteBalance -= cost;
     vb.currentBaseBalance += qty;
   } else if (side === 'SELL') {
+    // Check if enough BTC balance
+    if (vb.currentBaseBalance < qty) {
+      console.log(
+        `[Bot ${config.id}] Insufficient BTC balance: ${vb.currentBaseBalance} < ${qty}`,
+      );
+      return false;
+    }
     const proceeds = qty * price;
     vb.currentQuoteBalance += proceeds;
     vb.currentBaseBalance -= qty;
   }
 
-  return vb;
+  updateBot(config);
+  return true;
 }
 
 async function runBot(botConfig, apiKey, apiSecret) {
@@ -521,20 +536,38 @@ async function runBot(botConfig, apiKey, apiSecret) {
               currentBaseBalance: 0,
             };
           }
+
+          // Initialize virtual position if not exists
+          if (!config.virtualPosition) {
+            config.virtualPosition = {
+              positionAmt: 0,
+              entryPrice: 0,
+            };
+          }
+
           walletBalance = config.virtualBalance.initialQuoteBalance;
+          positionAmt = config.virtualPosition.positionAmt || 0;
+          const entryPrice = config.virtualPosition.entryPrice || 0;
+          const markPrice = closes[closes.length - 1];
+
+          // Calculate unrealized profit for virtual position
+          let unrealizedProfit = 0;
+          if (positionAmt !== 0 && entryPrice > 0 && markPrice > 0) {
+            unrealizedProfit = positionAmt * (markPrice - entryPrice);
+          }
 
           state.account = {
             totalWalletBalance: walletBalance,
-            totalUnrealizedProfit: 0,
+            totalUnrealizedProfit: unrealizedProfit,
             virtual: true,
           };
 
           state.position = {
             symbol,
-            positionAmt: 0,
-            entryPrice: 0,
-            markPrice: null,
-            unrealizedProfit: 0,
+            positionAmt,
+            entryPrice,
+            markPrice,
+            unrealizedProfit,
           };
         } else {
           // Use real account for live trading
@@ -605,8 +638,14 @@ async function runBot(botConfig, apiKey, apiSecret) {
                 reduceOnly: true,
               },
             });
+          } else {
+            // Reset virtual position for dry run
+            if (config.virtualPosition) {
+              config.virtualPosition.positionAmt = 0;
+              config.virtualPosition.entryPrice = 0;
+            }
+            updateBot(config);
           }
-
           runtime.lastOrderCandle = runtime.candleCount;
 
           const lossUSDT = Math.abs(unrealizedProfit || 0);
@@ -664,6 +703,13 @@ async function runBot(botConfig, apiKey, apiSecret) {
                     quantity: qty,
                   },
                 });
+              } else {
+                // Update virtual position for dry run
+                if (config.virtualPosition) {
+                  config.virtualPosition.positionAmt = qty;
+                  config.virtualPosition.entryPrice = lastPrice;
+                }
+                updateBot(config);
               }
               runtime.lastOrderCandle = runtime.candleCount;
             } else if (signal === 'SHORT' && positionAmt >= 0) {
@@ -685,6 +731,13 @@ async function runBot(botConfig, apiKey, apiSecret) {
                     quantity: qty,
                   },
                 });
+              } else {
+                // Update virtual position for dry run
+                if (config.virtualPosition) {
+                  config.virtualPosition.positionAmt = -qty;
+                  config.virtualPosition.entryPrice = lastPrice;
+                }
+                updateBot(config);
               }
               runtime.lastOrderCandle = runtime.candleCount;
             }
@@ -788,15 +841,35 @@ async function runBot(botConfig, apiKey, apiSecret) {
 
         if (qty > 0) {
           if (signal === 'LONG') {
-            decision = {
-              action: config.dryRun ? 'DRY_BUY' : 'BUY',
-              reason: 'MA_CROSS',
-              qty,
-              signal,
-            };
             if (config.dryRun) {
-              updateVirtualBalance(config, 'BUY', qty, lastPrice);
+              const success = updateVirtualBalance(
+                config,
+                'BUY',
+                qty,
+                lastPrice,
+              );
+              if (success) {
+                decision = {
+                  action: 'DRY_BUY',
+                  reason: 'MA_CROSS',
+                  qty,
+                  signal,
+                };
+              } else {
+                decision = {
+                  action: 'NONE',
+                  reason: 'INSUFFICIENT_BALANCE',
+                  qty,
+                  signal,
+                };
+              }
             } else {
+              decision = {
+                action: 'BUY',
+                reason: 'MA_CROSS',
+                qty,
+                signal,
+              };
               await spotOrder({
                 baseUrl,
                 apiKey,
@@ -810,15 +883,35 @@ async function runBot(botConfig, apiKey, apiSecret) {
               });
             }
           } else if (signal === 'SHORT') {
-            decision = {
-              action: config.dryRun ? 'DRY_SELL' : 'SELL',
-              reason: 'MA_CROSS',
-              qty,
-              signal,
-            };
             if (config.dryRun) {
-              updateVirtualBalance(config, 'SELL', qty, lastPrice);
+              const success = updateVirtualBalance(
+                config,
+                'SELL',
+                qty,
+                lastPrice,
+              );
+              if (success) {
+                decision = {
+                  action: 'DRY_SELL',
+                  reason: 'MA_CROSS',
+                  qty,
+                  signal,
+                };
+              } else {
+                decision = {
+                  action: 'NONE',
+                  reason: 'INSUFFICIENT_BALANCE',
+                  qty,
+                  signal,
+                };
+              }
             } else {
+              decision = {
+                action: 'SELL',
+                reason: 'MA_CROSS',
+                qty,
+                signal,
+              };
               await spotOrder({
                 baseUrl,
                 apiKey,

@@ -69,6 +69,22 @@ export function updateBot(bot) {
     bot.virtualBalance?.currentBaseBalance || null,
     bot.id,
   );
+
+  // Update virtual position fields separately
+  if (bot.virtualPosition) {
+    db.prepare(
+      `
+      UPDATE bots SET
+        virtual_position_amt = ?,
+        virtual_position_entry_price = ?
+      WHERE id = ?
+    `,
+    ).run(
+      bot.virtualPosition.positionAmt || 0,
+      bot.virtualPosition.entryPrice || 0,
+      bot.id,
+    );
+  }
 }
 
 export function insertProfitHistory(data) {
@@ -231,6 +247,14 @@ function rowToBot(row) {
           currentBaseBalance: row.virtual_balance_current_base,
         }
       : undefined,
+    virtualPosition:
+      row.virtual_position_amt !== undefined &&
+      row.virtual_position_amt !== null
+        ? {
+            positionAmt: row.virtual_position_amt,
+            entryPrice: row.virtual_position_entry_price || 0,
+          }
+        : undefined,
   };
 }
 
